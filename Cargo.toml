@@ -1,17 +1,24 @@
+[workspace]
+resolver = "3"
+
 [package]
 name = "taxon"
 version = "0.2.0-rc.5"
-edition.workspace = true
-rust-version.workspace = true
-license.workspace = true
-repository.workspace = true
-description = "Layout-free abstract type vocabulary shared by schema-aware crates."
-publish = false
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/bearcove/taxon"
+homepage = "https://github.com/bearcove/taxon"
+description = "Format-independent schema model and canonical identity."
 
-[package.metadata]
-
-[package.metadata."docs.rs"]
+[package.metadata.docs.rs]
 rustdoc-args = ["--html-in-header", "arborium-header.html"]
 
 [dependencies]
-blake3 = { workspace = true, default-features = false }
+blake3 = { version = "1", default-features = false }
+
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ["cfg(facet_no_doc)", "cfg(kani)"] }
+
+[lints.clippy]
+disallowed_methods = "deny"
