@@ -33,10 +33,14 @@ use crate::{
 // to the sink as a *string*. (Building blocks: little-endian ints; a string is a
 // u32 LE length then UTF-8; a bool is one byte.)
 
-fn write_type_params<S: Sink>(out: &mut S, params: &[String]) {
+fn write_schema_type_params<S: Sink>(out: &mut S, params: &[String]) {
+    if params.is_empty() {
+        return;
+    }
+    write_str(out, "type-params");
     write_u32(out, params.len() as u32);
-    for p in params {
-        write_str(out, p);
+    for param in params {
+        write_str(out, param);
     }
 }
 
@@ -237,12 +241,12 @@ impl Walk<'_> {
     // r[impl schema-identity.canonical-encoding]
     fn schema<S: Sink>(&self, idx: NodeIx, path: &[NodeIx], out: &mut S) {
         let schema = &self.batch[idx.ix()];
+        write_schema_type_params(out, &schema.type_params);
         match &schema.kind {
             Kind::Primitive(p) => write_str(out, p.tag()),
             Kind::Struct { name, fields } => {
                 write_str(out, "struct");
                 write_str(out, name);
-                write_type_params(out, &schema.type_params);
                 write_u32(out, fields.len() as u32);
                 for field in fields {
                     self.field(field, path, out);
@@ -251,7 +255,6 @@ impl Walk<'_> {
             Kind::Enum { name, variants } => {
                 write_str(out, "enum");
                 write_str(out, name);
-                write_type_params(out, &schema.type_params);
                 write_u32(out, variants.len() as u32);
                 for v in variants {
                     write_str(out, &v.name);
@@ -768,6 +771,59 @@ mod tests {
             resolve_ids(vec![required])[0].id,
             resolve_ids(vec![optional])[0].id
         );
+    }
+
+    fn generic_tuple(type_params: &[&str]) -> Schema {
+        Schema {
+            id: SchemaId::from_raw(1),
+            type_params: type_params.iter().map(|name| (*name).to_string()).collect(),
+            kind: Kind::Tuple {
+                elements: vec![SchemaRef::var("T"), SchemaRef::var("U")],
+            },
+        }
+    }
+
+    #[test]
+    // r[verify schema-identity.canonical-encoding]
+    fn ordered_type_parameters_are_part_of_every_schema_identity() {
+        let tu = resolve_ids(vec![generic_tuple(&["T", "U"])])[0].id;
+        let ut = resolve_ids(vec![generic_tuple(&["U", "T"])])[0].id;
+        assert_ne!(tu, ut);
+
+        let one = resolve_ids(vec![generic_tuple(&["T"])])[0].id;
+        let two = resolve_ids(vec![generic_tuple(&["T", "U"])])[0].id;
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    // r[verify schema-identity.computation]
+    fn cyclic_inline_identity_includes_each_members_ordered_type_parameters() {
+        let cycle = |second_params: &[&str]| {
+            vec![
+                Schema {
+                    id: SchemaId::from_raw(10),
+                    type_params: vec!["T".to_string(), "U".to_string()],
+                    kind: Kind::Tuple {
+                        elements: vec![SchemaRef::concrete(SchemaId::from_raw(20))],
+                    },
+                },
+                Schema {
+                    id: SchemaId::from_raw(20),
+                    type_params: second_params
+                        .iter()
+                        .map(|name| (*name).to_string())
+                        .collect(),
+                    kind: Kind::Tuple {
+                        elements: vec![SchemaRef::concrete(SchemaId::from_raw(10))],
+                    },
+                },
+            ]
+        };
+
+        let canonical = resolve_ids(cycle(&["T", "U"]));
+        let reordered = resolve_ids(cycle(&["U", "T"]));
+        assert_ne!(canonical[0].id, reordered[0].id);
+        assert_ne!(canonical[1].id, reordered[1].id);
     }
 
     /// Build the linked-list cycle `Node { value: u32, next: Option<Node> }`,
