@@ -144,6 +144,16 @@ fn visit_kind_targets(kind: &Kind, f: &mut impl FnMut(SchemaId)) {
                 on_ref(r, f);
             }
         }
+        Kind::Semantic {
+            args,
+            representation,
+            ..
+        } => {
+            for argument in args {
+                on_ref(argument, f);
+            }
+            on_ref(representation, f);
+        }
     }
 }
 
@@ -345,6 +355,22 @@ impl Walk<'_> {
                     }
                 }
             }
+            Kind::Semantic {
+                name,
+                args,
+                representation,
+            } => {
+                write_str(out, "semantic");
+                write_str(out, "name");
+                write_str(out, name.as_str());
+                write_str(out, "args");
+                write_u32(out, args.len() as u32);
+                for argument in args {
+                    self.reference(argument, path, out);
+                }
+                write_str(out, "representation");
+                self.reference(representation, path, out);
+            }
         }
     }
 
@@ -485,6 +511,15 @@ fn remap_kind(kind: &Kind, map: &BTreeMap<u64, SchemaId>) -> Kind {
         Kind::External { kind, metadata } => Kind::External {
             kind: kind.clone(),
             metadata: metadata.as_ref().map(|r| remap_ref(r, map)),
+        },
+        Kind::Semantic {
+            name,
+            args,
+            representation,
+        } => Kind::Semantic {
+            name: name.clone(),
+            args: args.iter().map(|r| remap_ref(r, map)).collect(),
+            representation: remap_ref(representation, map),
         },
     }
 }
@@ -975,5 +1010,81 @@ mod tests {
             resolve_ids(vec![make("A")])[0].id,
             resolve_ids(vec![make("Z")])[0].id
         );
+    }
+
+    #[test]
+    fn semantic_name_arguments_and_representation_contribute_to_identity() {
+        let semantic = |name: &str, argument: Primitive, representation: Primitive| Schema {
+            id: SchemaId::from_raw(1),
+            type_params: vec!["T".to_string()],
+            kind: Kind::Semantic {
+                name: crate::SemanticName::try_from(name).expect("semantic name"),
+                args: vec![SchemaRef::concrete(primitive_id(argument))],
+                representation: SchemaRef::concrete(primitive_id(representation)),
+            },
+        };
+
+        let base = resolve_ids(vec![semantic(
+            "org.bearcove.phon.region-ref-v1",
+            Primitive::U32,
+            Primitive::U32,
+        )])[0]
+            .id;
+        assert_ne!(
+            base,
+            resolve_ids(vec![semantic(
+                "org.bearcove.phon.other-ref-v1",
+                Primitive::U32,
+                Primitive::U32,
+            )])[0]
+                .id
+        );
+        assert_ne!(
+            base,
+            resolve_ids(vec![semantic(
+                "org.bearcove.phon.region-ref-v1",
+                Primitive::U64,
+                Primitive::U32,
+            )])[0]
+                .id
+        );
+        assert_ne!(
+            base,
+            resolve_ids(vec![semantic(
+                "org.bearcove.phon.region-ref-v1",
+                Primitive::U32,
+                Primitive::U64,
+            )])[0]
+                .id
+        );
+    }
+
+    #[test]
+    fn semantic_arguments_and_representation_participate_in_cycles() {
+        let cycle = |representation_key: u64| {
+            vec![
+                Schema {
+                    id: SchemaId::from_raw(10),
+                    type_params: Vec::new(),
+                    kind: Kind::Semantic {
+                        name: crate::SemanticName::try_from("region-ref").unwrap(),
+                        args: vec![SchemaRef::concrete(SchemaId::from_raw(20))],
+                        representation: SchemaRef::concrete(SchemaId::from_raw(representation_key)),
+                    },
+                },
+                Schema {
+                    id: SchemaId::from_raw(20),
+                    type_params: Vec::new(),
+                    kind: Kind::Tuple {
+                        elements: vec![SchemaRef::concrete(SchemaId::from_raw(10))],
+                    },
+                },
+            ]
+        };
+
+        let cyclic_representation = resolve_ids(cycle(20));
+        let primitive_representation = resolve_ids(cycle(primitive_id(Primitive::U32).as_u64()));
+        assert_ne!(cyclic_representation[0].id, primitive_representation[0].id);
+        assert_ne!(cyclic_representation[1].id, primitive_representation[1].id);
     }
 }

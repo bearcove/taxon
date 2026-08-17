@@ -56,6 +56,54 @@ impl fmt::Display for SchemaId {
     }
 }
 
+/// A non-empty semantic identifier carried by a format-independent schema.
+///
+/// Taxon constrains only identity-safe storage. Protocols such as PHON own
+/// stricter naming grammar, namespace, and wire bounds.
+#[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct SemanticName(String);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticNameError {
+    Empty,
+    TooLong,
+}
+
+impl SemanticName {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl TryFrom<String> for SemanticName {
+    type Error = SemanticNameError;
+
+    fn try_from(value: String) -> Result<Self, Self::Error> {
+        if value.is_empty() {
+            return Err(SemanticNameError::Empty);
+        }
+        if value.len() > u32::MAX as usize {
+            return Err(SemanticNameError::TooLong);
+        }
+        Ok(Self(value))
+    }
+}
+
+impl TryFrom<&str> for SemanticName {
+    type Error = SemanticNameError;
+
+    fn try_from(value: &str) -> Result<Self, Self::Error> {
+        Self::try_from(String::from(value))
+    }
+}
+
+impl fmt::Display for SemanticName {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// A schema: a content-derived id, an optional list of type-parameter names if
 /// the schema is parametric, and a kind describing what it represents.
 ///
@@ -120,6 +168,11 @@ pub enum Kind {
     External {
         kind: String,
         metadata: Option<SchemaRef>,
+    },
+    Semantic {
+        name: SemanticName,
+        args: Vec<SchemaRef>,
+        representation: SchemaRef,
     },
 }
 
