@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0-rc.6](https://github.com/bearcove/taxon/compare/v0.2.0-rc.5...v0.2.0-rc.6) - 2026-08-19
+
+### Other
+
+- use official release-plz workflow
+- release v0.2.0-rc.5
+
 ## [0.2.0-rc.5](https://github.com/bearcove/taxon/compare/v0.0.0...v0.2.0-rc.5) - 2026-08-19
 
 ### Added
