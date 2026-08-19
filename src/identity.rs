@@ -33,10 +33,14 @@ use crate::{
 // to the sink as a *string*. (Building blocks: little-endian ints; a string is a
 // u32 LE length then UTF-8; a bool is one byte.)
 
-fn write_type_params<S: Sink>(out: &mut S, params: &[String]) {
+fn write_schema_type_params<S: Sink>(out: &mut S, params: &[String]) {
+    if params.is_empty() {
+        return;
+    }
+    write_str(out, "type-params");
     write_u32(out, params.len() as u32);
-    for p in params {
-        write_str(out, p);
+    for param in params {
+        write_str(out, param);
     }
 }
 
@@ -140,6 +144,16 @@ fn visit_kind_targets(kind: &Kind, f: &mut impl FnMut(SchemaId)) {
                 on_ref(r, f);
             }
         }
+        Kind::Semantic {
+            args,
+            representation,
+            ..
+        } => {
+            for argument in args {
+                on_ref(argument, f);
+            }
+            on_ref(representation, f);
+        }
     }
 }
 
@@ -237,12 +251,12 @@ impl Walk<'_> {
     // r[impl schema-identity.canonical-encoding]
     fn schema<S: Sink>(&self, idx: NodeIx, path: &[NodeIx], out: &mut S) {
         let schema = &self.batch[idx.ix()];
+        write_schema_type_params(out, &schema.type_params);
         match &schema.kind {
             Kind::Primitive(p) => write_str(out, p.tag()),
             Kind::Struct { name, fields } => {
                 write_str(out, "struct");
                 write_str(out, name);
-                write_type_params(out, &schema.type_params);
                 write_u32(out, fields.len() as u32);
                 for field in fields {
                     self.field(field, path, out);
@@ -251,7 +265,6 @@ impl Walk<'_> {
             Kind::Enum { name, variants } => {
                 write_str(out, "enum");
                 write_str(out, name);
-                write_type_params(out, &schema.type_params);
                 write_u32(out, variants.len() as u32);
                 for v in variants {
                     write_str(out, &v.name);
@@ -341,6 +354,22 @@ impl Walk<'_> {
                         self.reference(r, path, out);
                     }
                 }
+            }
+            Kind::Semantic {
+                name,
+                args,
+                representation,
+            } => {
+                write_str(out, "semantic");
+                write_str(out, "name");
+                write_str(out, name.as_str());
+                write_str(out, "args");
+                write_u32(out, args.len() as u32);
+                for argument in args {
+                    self.reference(argument, path, out);
+                }
+                write_str(out, "representation");
+                self.reference(representation, path, out);
             }
         }
     }
@@ -482,6 +511,15 @@ fn remap_kind(kind: &Kind, map: &BTreeMap<u64, SchemaId>) -> Kind {
         Kind::External { kind, metadata } => Kind::External {
             kind: kind.clone(),
             metadata: metadata.as_ref().map(|r| remap_ref(r, map)),
+        },
+        Kind::Semantic {
+            name,
+            args,
+            representation,
+        } => Kind::Semantic {
+            name: name.clone(),
+            args: args.iter().map(|r| remap_ref(r, map)).collect(),
+            representation: remap_ref(representation, map),
         },
     }
 }
@@ -770,6 +808,59 @@ mod tests {
         );
     }
 
+    fn generic_tuple(type_params: &[&str]) -> Schema {
+        Schema {
+            id: SchemaId::from_raw(1),
+            type_params: type_params.iter().map(|name| (*name).to_string()).collect(),
+            kind: Kind::Tuple {
+                elements: vec![SchemaRef::var("T"), SchemaRef::var("U")],
+            },
+        }
+    }
+
+    #[test]
+    // r[verify schema-identity.canonical-encoding]
+    fn ordered_type_parameters_are_part_of_every_schema_identity() {
+        let tu = resolve_ids(vec![generic_tuple(&["T", "U"])])[0].id;
+        let ut = resolve_ids(vec![generic_tuple(&["U", "T"])])[0].id;
+        assert_ne!(tu, ut);
+
+        let one = resolve_ids(vec![generic_tuple(&["T"])])[0].id;
+        let two = resolve_ids(vec![generic_tuple(&["T", "U"])])[0].id;
+        assert_ne!(one, two);
+    }
+
+    #[test]
+    // r[verify schema-identity.computation]
+    fn cyclic_inline_identity_includes_each_members_ordered_type_parameters() {
+        let cycle = |second_params: &[&str]| {
+            vec![
+                Schema {
+                    id: SchemaId::from_raw(10),
+                    type_params: vec!["T".to_string(), "U".to_string()],
+                    kind: Kind::Tuple {
+                        elements: vec![SchemaRef::concrete(SchemaId::from_raw(20))],
+                    },
+                },
+                Schema {
+                    id: SchemaId::from_raw(20),
+                    type_params: second_params
+                        .iter()
+                        .map(|name| (*name).to_string())
+                        .collect(),
+                    kind: Kind::Tuple {
+                        elements: vec![SchemaRef::concrete(SchemaId::from_raw(10))],
+                    },
+                },
+            ]
+        };
+
+        let canonical = resolve_ids(cycle(&["T", "U"]));
+        let reordered = resolve_ids(cycle(&["U", "T"]));
+        assert_ne!(canonical[0].id, reordered[0].id);
+        assert_ne!(canonical[1].id, reordered[1].id);
+    }
+
     /// Build the linked-list cycle `Node { value: u32, next: Option<Node> }`,
     /// modelled as two schemas: `Node` (key 10) and `Option<Node>` (key 20),
     /// referencing each other. Returns them in the given order.
@@ -919,5 +1010,81 @@ mod tests {
             resolve_ids(vec![make("A")])[0].id,
             resolve_ids(vec![make("Z")])[0].id
         );
+    }
+
+    #[test]
+    fn semantic_name_arguments_and_representation_contribute_to_identity() {
+        let semantic = |name: &str, argument: Primitive, representation: Primitive| Schema {
+            id: SchemaId::from_raw(1),
+            type_params: vec!["T".to_string()],
+            kind: Kind::Semantic {
+                name: crate::SemanticName::try_from(name).expect("semantic name"),
+                args: vec![SchemaRef::concrete(primitive_id(argument))],
+                representation: SchemaRef::concrete(primitive_id(representation)),
+            },
+        };
+
+        let base = resolve_ids(vec![semantic(
+            "org.bearcove.phon.region-ref-v1",
+            Primitive::U32,
+            Primitive::U32,
+        )])[0]
+            .id;
+        assert_ne!(
+            base,
+            resolve_ids(vec![semantic(
+                "org.bearcove.phon.other-ref-v1",
+                Primitive::U32,
+                Primitive::U32,
+            )])[0]
+                .id
+        );
+        assert_ne!(
+            base,
+            resolve_ids(vec![semantic(
+                "org.bearcove.phon.region-ref-v1",
+                Primitive::U64,
+                Primitive::U32,
+            )])[0]
+                .id
+        );
+        assert_ne!(
+            base,
+            resolve_ids(vec![semantic(
+                "org.bearcove.phon.region-ref-v1",
+                Primitive::U32,
+                Primitive::U64,
+            )])[0]
+                .id
+        );
+    }
+
+    #[test]
+    fn semantic_arguments_and_representation_participate_in_cycles() {
+        let cycle = |representation_key: u64| {
+            vec![
+                Schema {
+                    id: SchemaId::from_raw(10),
+                    type_params: Vec::new(),
+                    kind: Kind::Semantic {
+                        name: crate::SemanticName::try_from("region-ref").unwrap(),
+                        args: vec![SchemaRef::concrete(SchemaId::from_raw(20))],
+                        representation: SchemaRef::concrete(SchemaId::from_raw(representation_key)),
+                    },
+                },
+                Schema {
+                    id: SchemaId::from_raw(20),
+                    type_params: Vec::new(),
+                    kind: Kind::Tuple {
+                        elements: vec![SchemaRef::concrete(SchemaId::from_raw(10))],
+                    },
+                },
+            ]
+        };
+
+        let cyclic_representation = resolve_ids(cycle(20));
+        let primitive_representation = resolve_ids(cycle(primitive_id(Primitive::U32).as_u64()));
+        assert_ne!(cyclic_representation[0].id, primitive_representation[0].id);
+        assert_ne!(cyclic_representation[1].id, primitive_representation[1].id);
     }
 }
